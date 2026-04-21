@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Air Piano</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#050508;overflow:hidden;width:100vw;height:100vh;font-family:monospace}
+video{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);opacity:0.3}
+canvas{position:fixed;top:0;left:0;width:100%;height:100%}
+#status{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:rgba(255,255,255,.3)}
+#status.active{color:rgba(255,220,100,.9)}
+#loading{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;color:rgba(255,255,255,.4);font-size:11px;letter-spacing:.2em;text-transform:uppercase}
+.spinner{width:36px;height:36px;border:2px solid rgba(255,255,255,.08);border-top-color:rgba(255,220,100,.6);border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 16px}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<video id="video" autoplay playsinline muted></video>
+<canvas id="canvas"></canvas>
+<div id="status">Zeig deine Hände!</div>
+<div id="loading"><div class="spinner"></div>Lade Air Piano…</div>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script>
+const video=document.getElementById('video');
+const canvas=document.getElementById('canvas');
+const ctx=canvas.getContext('2d');
+const statusEl=document.getElementById('status');
+const loadingEl=document.getElementById('loading');
+let W,H;
+function resize(){W=canvas.width=window.innerWidth;H=canvas.height=window.innerHeight;}
+resize();window.addEventListener('resize',resize);
+
+// Audio
+const audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+function playNote(freq,vol=0.3){
+  const osc=audioCtx.createOscillator();
+  const gain=audioCtx.createGain();
+  osc.connect(gain);gain.connect(audioCtx.destination);
+  osc.type='sine';
+  osc.frequency.setValueAtTime(freq,audioCtx.currentTime);
+  gain.gain.setValueAtTime(vol,audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001,audioCtx.currentTime+1.2);
+  osc.start();osc.stop(audioCtx.currentTime+1.2);
+}
+
+// Piano keys – eine Oktave C4 bis C5
+const KEYS=[
+  {note:'C',freq:261.6,color:'rgba(255,255,255,0.9)',black:false},
+  {note:'C#',freq:277.2,color:'rgba(30,30,30,0.95)',black:true},
+  {note:'D',freq:293.7,color:'rgba(255,255,255,0.9)',black:false},
+  {note:'D#',freq:311.1,color:'rgba(30,30,30,0.95)',black:true},
+  {note:'E',freq:329.6,color:'rgba(255,255,255,0.9)',black:false},
+  {note:'F',freq:349.2,color:'rgba(255,255,255,0.9)',black:false},
+  {note:'F#',freq:370.0,color:'rgba(30,30,30,0.95)',black:true},
+  {note:'G',freq:392.0,color:'rgba(255,255,255,0.9)',black:false},
+  {note:'G#',freq:415.3,color:'rgba(30,30,30,0.95)',black:true},
+  {note:'A',freq:440.0,color:'rgba(255,255,255,0.9)',black:false},
+  {note:'A#',freq:466.2,color:'rgba(30,30,30,0.95)',black:true},
+  {note:'B',freq:493.9,color:'rgba(255,255,255,0.9)',black:false},
+  {note:'C5',freq:523.3,color:'rgba(255,255,255,0.9)',black:false},
+];
+
+const WHITE_KEYS=KEYS.filter(k=>!k.black);
+const BLACK_KEYS=KEYS.filter(k=>k.black);
+
+let keyStates={};
+let keyFlash={};
+let handData=[];
+const TIPS=[4,8,12,16,20];
+const COOLDOWN=350;
+let lastPlayed={};
+
+function getKeyRects(){
+  const wCount=WHITE_KEYS.length;
+  const keyW=W/wCount;
+  const keyH=H*0.35;
+  const keyY=H*0.62;
+  const rects=[];
+
+  // White keys
+  WHITE_KEYS.forEach((k,i)=>{
+    rects.push({...k, x:i*keyW, y:keyY, w:keyW-3, h:keyH, isBlack:false});
+  });
+
+  // Black keys
+  let wi=0;
+  KEYS.forEach((k,i)=>{
+    if(!k.black){wi++;return;}
+    const prevWhite=WHITE_KEYS.indexOf(KEYS[i-1]);
+    const bw=keyW*0.55;
+    const bh=keyH*0.6;
+    rects.push({...k, x:(prevWhite+1)*keyW-bw/2, y:keyY, w:bw, h:bh, isBlack:true});
+  });
+
+  return rects;
+}
+
+function drawPiano(rects){
+  // White keys first
+  rects.filter(r=>!r.isBlack).forEach(r=>{
+    const flash=keyFlash[r.note]||0;
+    const glow=Math.max(0,1-(Date.now()-flash)/300);
+    ctx.shadowBlur=glow*30;
+    ctx.shadowColor=`hsla(${50+Math.random()*20},100%,70%,${glow})`;
+    ctx.fillStyle=glow>0?`rgba(255,230,100,${0.6+glow*0.4})`:r.color;
+    ctx.beginPath();
+    ctx.roundRect(r.x,r.y,r.w,r.h,4);
+    ctx.fill();
+    ctx.strokeStyle='rgba(0,0,0,0.3)';
+    ctx.lineWidth=1;ctx.stroke();
+    // Note label
+    ctx.shadowBlur=0;
+    ctx.fillStyle=glow>0?'#000':'rgba(80,80,80,0.8)';
+    ctx.font=`bold ${Math.max(10,r.w*0.3)}px monospace`;
+    ctx.textAlign='center';
+    ctx.fillText(r.note,r.x+r.w/2,r.y+r.h-14);
+  });
+
+  // Black keys on top
+  rects.filter(r=>r.isBlack).forEach(r=>{
+    const flash=keyFlash[r.note]||0;
+    const glow=Math.max(0,1-(Date.now()-flash)/300);
+    ctx.shadowBlur=glow*25;
+    ctx.shadowColor=`hsla(200,100%,70%,${glow})`;
+    ctx.fillStyle=glow>0?`rgba(100,200,255,${0.7+glow*0.3})`:r.color;
+    ctx.beginPath();
+    ctx.roundRect(r.x,r.y,r.w,r.h,3);
+    ctx.fill();
+    ctx.shadowBlur=0;
+  });
+}
+
+function drawHands(rects){
+  for(const hand of handData){
+    const C=[[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17]];
+    ctx.strokeStyle='rgba(255,220,100,.2)';ctx.lineWidth=1;
+    for(const[a,b]of C){ctx.beginPath();ctx.moveTo(hand[a].x*W,hand[a].y*H);ctx.lineTo(hand[b].x*W,hand[b].y*H);ctx.stroke();}
+
+    TIPS.forEach((ti,fi)=>{
+      const px=hand[ti].x*W, py=hand[ti].y*H;
+      // Check key hit
+      const now=Date.now();
+      for(const r of [...rects.filter(r=>r.isBlack),...rects.filter(r=>!r.isBlack)]){
+        if(px>r.x&&px<r.x+r.w&&py>r.y&&py<r.y+r.h){
+          const key=`${fi}-${r.note}`;
+          if(!lastPlayed[key]||now-lastPlayed[key]>COOLDOWN){
+            playNote(r.freq);
+            keyFlash[r.note]=now;
+            lastPlayed[key]=now;
+          }
+          break;
+        }
+      }
+      // Fingertip dot
+      ctx.shadowBlur=20;
+      ctx.shadowColor='rgba(255,220,100,1)';
+      ctx.fillStyle='rgba(255,230,120,1)';
+      ctx.beginPath();ctx.arc(px,py,7,0,Math.PI*2);ctx.fill();
+      ctx.shadowBlur=0;
+    });
+  }
+}
+
+function render(){
+  ctx.clearRect(0,0,W,H);
+  const vg=ctx.createRadialGradient(W/2,H/2,H*.1,W/2,H/2,H*.9);
+  vg.addColorStop(0,'rgba(0,0,0,0)');vg.addColorStop(1,'rgba(0,0,8,.85)');
+  ctx.fillStyle=vg;ctx.fillRect(0,0,W,H);
+
+  const rects=getKeyRects();
+  drawPiano(rects);
+  drawHands(rects);
+  requestAnimationFrame(render);
+}
+
+async function init(){
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({video:{width:1280,height:720,facingMode:'user'},audio:false});
+    video.srcObject=stream;await new Promise(r=>video.onloadedmetadata=r);
+    const hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+    hands.setOptions({maxNumHands:2,modelComplexity:1,minDetectionConfidence:.75,minTrackingConfidence:.65});
+    hands.onResults(r=>{
+      handData=(r.multiHandLandmarks||[]).map(lm=>lm.map(p=>({x:1-p.x,y:p.y})));
+      const c=handData.length;
+      statusEl.textContent=c>0?'Spiel die Tasten!':'Zeig deine Hände!';
+      statusEl.className=c>0?'active':'';
+    });
+    const cam=new Camera(video,{onFrame:async()=>{await hands.send({image:video});},width:1280,height:720});
+    await cam.start();loadingEl.style.display='none';render();
+  }catch(e){
+    loadingEl.innerHTML='<p style="color:rgba(255,100,100,.7)">Kamera-Zugriff verweigert.<br>Bitte erlaube die Kamera.</p>';
+  }
+}
+init();
+</script>
+</body>
+</html>
